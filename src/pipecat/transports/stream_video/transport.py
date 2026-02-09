@@ -9,6 +9,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import numpy as np
@@ -38,8 +39,11 @@ try:
     import av
     from aiortc import MediaStreamTrack
     from getstream import AsyncStream
+    from getstream.models import UserRequest
     from getstream.video import rtc
     from getstream.video.rtc import AudioStreamTrack, PcmData
+    from getstream.video.rtc.pb.stream.video.sfu.models.models_pb2 import TrackType
+    from getstream.video.rtc.tracks import SubscriptionConfig, TrackSubscriptionConfig
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error(
@@ -146,7 +150,7 @@ class PipecatVideoStreamTrack(MediaStreamTrack):
             array = np.frombuffer(image, dtype=np.uint8).reshape(height, width, 3)
             frame = av.VideoFrame.from_ndarray(array, format="rgb24")
             frame.pts = self._pts
-            frame.time_base = f"1/{self._time_base_den}"
+            frame.time_base = Fraction(1, self._time_base_den)
             self._pts += int(self._time_base_den / self._framerate)
             try:
                 self._queue.put_nowait(frame)
@@ -187,7 +191,7 @@ class PipecatVideoStreamTrack(MediaStreamTrack):
                     self._last_frame.to_ndarray(format="rgb24"), format="rgb24"
                 )
                 held.pts = self._pts
-                held.time_base = f"1/{self._time_base_den}"
+                held.time_base = Fraction(1, self._time_base_den)
                 self._pts += int(self._time_base_den / self._framerate)
                 return held
             else:
@@ -195,7 +199,7 @@ class PipecatVideoStreamTrack(MediaStreamTrack):
                 black = np.zeros((480, 640, 3), dtype=np.uint8)
                 frame = av.VideoFrame.from_ndarray(black, format="rgb24")
                 frame.pts = self._pts
-                frame.time_base = f"1/{self._time_base_den}"
+                frame.time_base = Fraction(1, self._time_base_den)
                 self._pts += int(self._time_base_den / self._framerate)
                 return frame
 
@@ -252,8 +256,11 @@ class StreamVideoTransportClient:
         self._task_manager: Optional[BaseTaskManager] = None
         self._async_lock = asyncio.Lock()
 
-        # Two-phase track resolution state
-        self._pending_tracks: Dict[str, dict] = {}
+        # Two-phase track resolution state (bidirectional matching)
+        self._pending_tracks: Dict[str, dict] = {}  # track_added arrived, awaiting track_published
+        self._pending_publications: Dict[
+            tuple, dict
+        ] = {}  # track_published arrived, awaiting track_added
         self._track_map: Dict[tuple, str] = {}
         self._video_subscriber_tasks: Dict[str, asyncio.Task] = {}
         self._participants: Dict[str, dict] = {}
@@ -283,9 +290,7 @@ class StreamVideoTransportClient:
 
         # Ensure the bot user exists
         try:
-            await self._client.upsert_users(
-                users={self._user_id: {"id": self._user_id, "name": self._user_id}}
-            )
+            await self._client.upsert_users(UserRequest(id=self._user_id, name=self._user_id))
         except Exception as e:
             logger.warning(f"Could not create user {self._user_id}: {e}")
 
@@ -319,11 +324,18 @@ class StreamVideoTransportClient:
                 self._call = self._client.video.call(self._call_type, self._call_id)
                 await self._call.get_or_create(data={"created_by_id": self._user_id})
 
-                # Configure subscription to receive all tracks
-                subscription_config = rtc.SubscriptionConfig(subscribe_all=True)
+                # Configure subscription to receive audio and video tracks
+                subscription_config = SubscriptionConfig(
+                    default=TrackSubscriptionConfig(
+                        track_types=[
+                            TrackType.TRACK_TYPE_AUDIO,
+                            TrackType.TRACK_TYPE_VIDEO,
+                        ]
+                    )
+                )
 
                 # Join the call via WebRTC
-                self._connection = rtc.join(
+                self._connection = await rtc.join(
                     self._call,
                     self._user_id,
                     subscription_config=subscription_config,
@@ -407,6 +419,7 @@ class StreamVideoTransportClient:
             self._audio_track = None
             self._video_track = None
             self._pending_tracks.clear()
+            self._pending_publications.clear()
             self._track_map.clear()
             self._participants.clear()
             self._audio_subscribed_participants.clear()
@@ -442,13 +455,16 @@ class StreamVideoTransportClient:
 
     # Event handlers
 
-    def _on_audio(self, user_id: str, pcm_data: PcmData):
+    def _on_audio(self, pcm_data: PcmData):
         """Handle incoming audio from a participant.
 
         Args:
-            user_id: The participant's user ID.
-            pcm_data: The PCM audio data received.
+            pcm_data: The PCM audio data with .participant attribute set by the SDK.
         """
+        participant = getattr(pcm_data, "participant", None)
+        if participant is None:
+            return
+        user_id = participant.user_id
         if user_id == self._user_id:
             return
         try:
@@ -464,34 +480,58 @@ class StreamVideoTransportClient:
                 f"{self}::on_audio_track_subscribed",
             )
 
-    def _on_track_added(self, track_id: str, user_id: str, session_id: str, kind: str):
+    def _on_track_added(self, track_source_id: str, kind: str, user):
         """Handle WebRTC track added event (phase 1 of track resolution).
 
-        Stores the track in pending state awaiting SFU type confirmation.
+        Checks for a matching pending publication (if track_published arrived first)
+        or stores the track in pending state awaiting SFU type confirmation.
 
         Args:
-            track_id: The WebRTC track identifier.
-            user_id: The participant's user ID.
-            session_id: The participant's session ID.
+            track_source_id: The original track source identifier.
             kind: The WebRTC track kind ("audio" or "video").
+            user: The Participant protobuf object (or None).
         """
-        if user_id == self._user_id:
+        if user is None or user.user_id == self._user_id:
             return
 
-        self._pending_tracks[track_id] = {
-            "user_id": user_id,
-            "session_id": session_id,
-            "kind": kind,
-        }
-        logger.debug(f"Track added (pending): {track_id} from {user_id} kind={kind}")
+        user_id = user.user_id
+        session_id = user.session_id
 
-    def _on_participant_joined(self, user_id: str, session_id: str):
+        # Check for matching pending publication (track_published arrived first)
+        matched_pub_key = None
+        for pub_key in self._pending_publications:
+            pub_user_id, pub_session_id, track_type = pub_key
+            if pub_user_id == user_id and pub_session_id == session_id:
+                pub_kind = (
+                    "video"
+                    if track_type in (TrackType.TRACK_TYPE_VIDEO, TrackType.TRACK_TYPE_SCREEN_SHARE)
+                    else "audio"
+                )
+                if pub_kind == kind:
+                    matched_pub_key = pub_key
+                    break
+
+        if matched_pub_key:
+            self._pending_publications.pop(matched_pub_key)
+            track_type = matched_pub_key[2]
+            self._resolve_track(track_source_id, user_id, session_id, track_type)
+        else:
+            self._pending_tracks[track_source_id] = {
+                "user_id": user_id,
+                "session_id": session_id,
+                "kind": kind,
+            }
+            logger.debug(f"Track added (pending): {track_source_id} from {user_id} kind={kind}")
+
+    def _on_participant_joined(self, event):
         """Handle participant joined event.
 
         Args:
-            user_id: The participant's user ID.
-            session_id: The participant's session ID.
+            event: The ParticipantJoined protobuf event from the SFU.
         """
+        participant = event.participant
+        user_id = participant.user_id
+        session_id = participant.session_id
         if user_id == self._user_id:
             return
 
@@ -513,13 +553,14 @@ class StreamVideoTransportClient:
             self._other_participant_has_joined = True
             await self._callbacks.on_first_participant_joined(user_id)
 
-    def _on_participant_left(self, user_id: str, session_id: str):
+    def _on_participant_left(self, event):
         """Handle participant left event.
 
         Args:
-            user_id: The participant's user ID.
-            session_id: The participant's session ID.
+            event: The ParticipantLeft protobuf event from the SFU.
         """
+        participant = event.participant
+        user_id = participant.user_id
         if user_id == self._user_id:
             return
 
@@ -559,26 +600,30 @@ class StreamVideoTransportClient:
         if len(self.get_participants()) == 0:
             self._other_participant_has_joined = False
 
-    def _on_track_published(self, user_id: str, session_id: str, track_type: str):
+    def _on_track_published(self, event):
         """Handle SFU track published event (phase 2 of track resolution).
 
-        Matches the SFU track type with pending WebRTC tracks to resolve
-        the actual track type (audio, video, or screenshare).
+        Checks for a matching pending track (if track_added arrived first)
+        or stores as pending publication awaiting track_added.
 
         Args:
-            user_id: The participant's user ID.
-            session_id: The participant's session ID.
-            track_type: The SFU track type string.
+            event: The TrackPublished protobuf event from the SFU.
         """
+        user_id = event.user_id
+        session_id = event.session_id
+        track_type = event.type  # int TrackType enum
+
         if user_id == self._user_id:
             return
 
-        # Find matching pending track
-        matched_track_id = None
         expected_kind = (
-            "video" if "video" in track_type.lower() or "screen" in track_type.lower() else "audio"
+            "video"
+            if track_type in (TrackType.TRACK_TYPE_VIDEO, TrackType.TRACK_TYPE_SCREEN_SHARE)
+            else "audio"
         )
 
+        # Find matching pending track (track_added arrived first)
+        matched_track_id = None
         for track_id, info in self._pending_tracks.items():
             if (
                 info["user_id"] == user_id
@@ -588,22 +633,31 @@ class StreamVideoTransportClient:
                 matched_track_id = track_id
                 break
 
-        if not matched_track_id:
-            logger.debug(
-                f"No pending track found for published track: {user_id}/{session_id}/{track_type}"
-            )
-            return
+        if matched_track_id:
+            self._pending_tracks.pop(matched_track_id)
+            self._resolve_track(matched_track_id, user_id, session_id, track_type)
+        else:
+            # Store as pending publication, waiting for track_added
+            pub_key = (user_id, session_id, track_type)
+            self._pending_publications[pub_key] = {"track_type": track_type}
+            logger.debug(f"Track published (pending): {user_id}/{session_id}/{track_type}")
 
-        # Remove from pending
-        self._pending_tracks.pop(matched_track_id)
-        self._track_map[(user_id, session_id, track_type)] = matched_track_id
+    def _resolve_track(self, track_source_id: str, user_id: str, session_id: str, track_type: int):
+        """Resolve a track after both track_added and track_published have been received.
 
-        logger.debug(f"Track resolved: {matched_track_id} from {user_id} type={track_type}")
+        Args:
+            track_source_id: The original track source identifier.
+            user_id: The participant's user ID.
+            session_id: The participant's session ID.
+            track_type: The TrackType int enum value.
+        """
+        self._track_map[(user_id, session_id, track_type)] = track_source_id
+        logger.debug(f"Track resolved: {track_source_id} from {user_id} type={track_type}")
 
-        # Handle video track subscription
-        if expected_kind == "video" and "screen" not in track_type.lower():
+        # Start video subscriber only for TRACK_TYPE_VIDEO (not screenshare)
+        if track_type == TrackType.TRACK_TYPE_VIDEO:
             self._task_manager.create_task(
-                self._start_video_subscriber(matched_track_id, user_id),
+                self._start_video_subscriber(track_source_id, user_id),
                 f"{self}::_start_video_subscriber",
             )
 
@@ -651,19 +705,24 @@ class StreamVideoTransportClient:
         except Exception as e:
             logger.debug(f"Video receive loop ended for {user_id}: {e}")
 
-    def _on_track_unpublished(self, user_id: str, session_id: str, track_type: str):
+    def _on_track_unpublished(self, event):
         """Handle track unpublished event.
 
         Args:
-            user_id: The participant's user ID.
-            session_id: The participant's session ID.
-            track_type: The SFU track type string.
+            event: The TrackUnpublished protobuf event from the SFU.
         """
+        user_id = event.user_id
+        session_id = event.session_id
+        track_type = event.type  # int TrackType enum
+
         if user_id == self._user_id:
             return
 
         track_key = (user_id, session_id, track_type)
         track_id = self._track_map.pop(track_key, None)
+
+        # Also clean up any pending publication for this track
+        self._pending_publications.pop(track_key, None)
 
         if track_id:
             # Cancel video subscriber if it was a video track
@@ -672,17 +731,14 @@ class StreamVideoTransportClient:
             if task:
                 task.cancel()
 
-        expected_kind = (
-            "video" if "video" in track_type.lower() or "screen" in track_type.lower() else "audio"
-        )
-        if expected_kind == "video" and "screen" not in track_type.lower():
+        if track_type == TrackType.TRACK_TYPE_VIDEO:
             if user_id in self._video_subscribed_participants:
                 self._video_subscribed_participants.discard(user_id)
                 self._task_manager.create_task(
                     self._callbacks.on_video_track_unsubscribed(user_id),
                     f"{self}::on_video_track_unsubscribed",
                 )
-        elif expected_kind == "audio":
+        elif track_type in (TrackType.TRACK_TYPE_AUDIO, TrackType.TRACK_TYPE_SCREEN_SHARE_AUDIO):
             if user_id in self._audio_subscribed_participants:
                 self._audio_subscribed_participants.discard(user_id)
                 self._task_manager.create_task(
@@ -690,7 +746,7 @@ class StreamVideoTransportClient:
                     f"{self}::on_audio_track_unsubscribed",
                 )
 
-    def _on_call_ended(self):
+    def _on_call_ended(self, *args):
         """Handle call ended event."""
         logger.info("Stream Video call ended")
         if self._connected:
