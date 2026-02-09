@@ -7,6 +7,7 @@ from loguru import logger
 
 try:
     from getstream import AsyncStream
+    from getstream.models import UserRequest
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error(
@@ -42,10 +43,8 @@ class StreamVideoRESTHelper:
         Returns:
             Dictionary containing user data from Stream API.
         """
-        user_data = {"id": user_id}
-        if name:
-            user_data["name"] = name
-        response = await self._client.upsert_users(users={user_id: user_data})
+        user_request = UserRequest(id=user_id, name=name or user_id)
+        response = await self._client.upsert_users(user_request)
         return response
 
     async def create_call(self, call_type: str, call_id: str, created_by_id: str) -> dict:
