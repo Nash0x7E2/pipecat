@@ -29,7 +29,7 @@ dependencies = [
     "nltk>=3.9.1,<4",
     "numpy>=1.26.4,<3",
     "Pillow>=11.1.0,<12",
-    "protobuf~=5.29.6",
+    "protobuf>=5.29.6",
     "pydantic>=2.10.6,<3",
     "pyloudnorm~=0.1.1",
     "resampy~=0.4.3",
@@ -112,8 +112,8 @@ silero = [ "onnxruntime>=1.20.1,<2" ]
 simli = [ "simli-ai~=1.0.3"]
 soniox = [ "pipecat-ai[websockets-base]" ]
 soundfile = [ "soundfile~=0.13.1" ]
-stream-video = [ "getstream[webrtc]>=2.5.21" ]
 speechmatics = [ "speechmatics-voice[smart]>=0.2.8" ]
+stream-video = [ "getstream[webrtc]>=2.5.21" ]
 strands = [ "strands-agents>=1.9.1,<2" ]
 tavus=[]
 together = []
@@ -128,7 +128,7 @@ whisper = [ "faster-whisper~=1.1.1" ]
 dev = [
     "build~=1.2.2",
     "coverage~=7.9.1",
-    "grpcio-tools~=1.67.1",
+    "grpcio-tools>=1.67.1",
     "pip-tools~=7.4.1",
     "pre-commit~=4.2.0",
     "pyright>=1.1.404,<1.2",
@@ -148,6 +148,26 @@ docs = [
     "sphinx-markdown-builder",
     "sphinx-autodoc-typehints",
     "toml",
+]
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "mem0" },
+        { extra = "stream-video" },
+    ],
+    [
+        { extra = "nvidia" },
+        { extra = "stream-video" },
+    ],
+    [
+        { extra = "riva" },
+        { extra = "stream-video" },
+    ],
+    [
+        { extra = "hume" },
+        { extra = "stream-video" },
+    ],
 ]
 
 [tool.setuptools.packages.find]
