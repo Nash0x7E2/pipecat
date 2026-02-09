@@ -1,9 +1,3 @@
-#
-# Copyright (c) 2024-2026, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 """Stream Video REST Helpers.
 
 Methods that wrap the Stream Video API for call and user management.
