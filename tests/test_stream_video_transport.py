@@ -1,8 +1,9 @@
 """Tests for Stream Video transport implementation.
 
 Two focused tests:
-1. Mock-based full participant lifecycle (join → audio → video → leave)
-2. Real integration: bidirectional audio + video via Stream Video SFU
+1. Mock-based full participant lifecycle (join -> audio -> video -> leave)
+2. Real integration: StreamVideoTransportClient connects, sends audio+video,
+   a raw SDK participant verifies reception and sends media back.
 """
 
 import asyncio
@@ -24,7 +25,6 @@ try:
         PipecatVideoStreamTrack,
         StreamVideoCallbacks,
         StreamVideoParams,
-        StreamVideoTransport,
         StreamVideoTransportClient,
     )
 
@@ -132,7 +132,7 @@ def _make_pcm_data(user_id: str, session_id: str = "session-1"):
 @unittest.skipUnless(STREAM_VIDEO_AVAILABLE, "getstream[webrtc] package not installed")
 class TestStreamVideoParticipantLifecycle(unittest.IsolatedAsyncioTestCase):
     """Mock-based test covering the full event lifecycle:
-    join → audio → track add/publish → track unpublish → leave.
+    join -> audio -> track add/publish -> track unpublish -> leave.
     """
 
     async def test_full_participant_session(self):
@@ -184,7 +184,7 @@ class TestStreamVideoParticipantLifecycle(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
-# Test 2: Real Integration — Bidirectional Audio + Video via Stream API
+# Test 2: Real Integration — StreamVideoTransportClient sends/receives media
 # ---------------------------------------------------------------------------
 
 STREAM_API_KEY = os.environ.get("STREAM_API_KEY")
@@ -197,179 +197,184 @@ STREAM_INTEGRATION_AVAILABLE = bool(STREAM_VIDEO_AVAILABLE and STREAM_API_KEY an
     "Requires STREAM_API_KEY and STREAM_API_SECRET env vars and getstream[webrtc]",
 )
 class TestStreamVideoBidirectionalMedia(unittest.IsolatedAsyncioTestCase):
-    """Real integration test: two participants exchange audio + video via Stream Video.
+    """Real integration test using StreamVideoTransportClient.
 
-    Connects two ConnectionManagers to a real Stream Video call, publishes
-    audio and video from participant-B, and verifies participant-A receives them.
-    Then publishes from participant-A and verifies participant-B receives them.
+    The bot connects via the actual transport client (connect/disconnect),
+    publishes audio+video, and a raw SDK participant verifies reception.
+    The raw participant also sends media back to verify the transport receives it.
     """
 
     async def test_simultaneous_audio_and_video_bidirectional(self):
-        """Two real participants exchange audio and video over Stream Video SFU."""
+        """StreamVideoTransportClient exchanges audio+video with a real participant."""
         from getstream import AsyncStream
         from getstream.models import UserRequest
         from getstream.video import rtc
         from getstream.video.rtc import AudioStreamTrack, PcmData
         from getstream.video.rtc.tracks import SubscriptionConfig, TrackSubscriptionConfig
 
-        from pipecat.transports.stream_video.transport import PipecatVideoStreamTrack
-
-        # ── Setup: create client, users, and call ──────────────────────
-        api_client = AsyncStream(api_key=STREAM_API_KEY, api_secret=STREAM_API_SECRET)
+        # ── Setup: create call and users ─────────────────────────────
         call_id = f"integration-test-{uuid.uuid4().hex[:8]}"
-        user_a_id = f"user-a-{uuid.uuid4().hex[:6]}"
-        user_b_id = f"user-b-{uuid.uuid4().hex[:6]}"
+        bot_user_id = f"bot-{uuid.uuid4().hex[:6]}"
+        human_user_id = f"human-{uuid.uuid4().hex[:6]}"
 
-        await api_client.upsert_users(
-            UserRequest(id=user_a_id, name="User A"),
-            UserRequest(id=user_b_id, name="User B"),
+        # ── Create the bot via StreamVideoTransportClient ────────────
+        bot_params = StreamVideoParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            video_in_enabled=False,
+            video_out_enabled=True,
+            video_out_framerate=15,
+        )
+        bot_callbacks = _create_callbacks()
+        bot_client = StreamVideoTransportClient(
+            api_key=STREAM_API_KEY,
+            api_secret=STREAM_API_SECRET,
+            call_type="default",
+            call_id=call_id,
+            user_id=bot_user_id,
+            params=bot_params,
+            callbacks=bot_callbacks,
+            transport_name="integration-test-bot",
         )
 
-        call = api_client.video.call("default", call_id)
-        await call.get_or_create(data={"created_by_id": user_a_id})
+        # Provide a real task manager that actually creates asyncio tasks
+        class SimpleTaskManager:
+            def create_task(self, coro, name=None):
+                return asyncio.ensure_future(coro)
 
-        sub_config = SubscriptionConfig(
-            default=TrackSubscriptionConfig(
-                track_types=[1, 2],  # AUDIO=1, VIDEO=2
-            )
+        bot_client._task_manager = SimpleTaskManager()
+
+        # Initialize the API client and upsert bot user (what setup() does)
+        bot_client._client = AsyncStream(api_key=STREAM_API_KEY, api_secret=STREAM_API_SECRET)
+        await bot_client._client.upsert_users(UserRequest(id=bot_user_id, name="Bot"))
+
+        # Pre-create the human user
+        await bot_client._client.upsert_users(
+            UserRequest(id=human_user_id, name="Human"),
         )
 
-        # ── Collectors for received media ──────────────────────────────
-        a_received_audio = []
-        a_received_video_tracks = []
-        b_received_audio = []
-        b_received_video_tracks = []
+        # Start the client (sets output sample rate)
+        mock_start_frame = MagicMock()
+        mock_start_frame.audio_out_sample_rate = 24000
+        await bot_client.start(mock_start_frame)
 
-        # ── Connect participant A first ────────────────────────────────
-        cm_a = await rtc.join(call, user_id=user_a_id, create=False, subscription_config=sub_config)
-
-        # Register listeners BEFORE entering context manager
-        @cm_a.on("audio")
-        def on_a_audio(pcm_data):
-            a_received_audio.append(pcm_data)
-
-        @cm_a.on("track_added")
-        def on_a_track_added(track_id, kind, user):
-            if kind == "video" and user and user.user_id != user_a_id:
-                a_received_video_tracks.append(track_id)
+        # ── Connect the bot to the call via the transport ────────────
+        await bot_client.connect()
 
         try:
-            async with cm_a:
-                # ── Connect participant B ──────────────────────────────
-                cm_b = await rtc.join(
-                    call, user_id=user_b_id, create=False, subscription_config=sub_config
+            self.assertTrue(bot_client._connected, "Bot should be connected")
+            self.assertIsNotNone(bot_client._audio_track, "Bot should have an audio track")
+            self.assertIsNotNone(bot_client._video_track, "Bot should have a video track")
+
+            # ── Connect a raw SDK participant (the "human") ──────────
+            api_client = AsyncStream(api_key=STREAM_API_KEY, api_secret=STREAM_API_SECRET)
+            call = api_client.video.call("default", call_id)
+
+            sub_config = SubscriptionConfig(default=TrackSubscriptionConfig(track_types=[1, 2]))
+            cm_human = await rtc.join(
+                call, user_id=human_user_id, create=False, subscription_config=sub_config
+            )
+
+            # Collectors for media the human receives from the bot
+            human_received_audio = []
+            human_received_video_tracks = []
+
+            @cm_human.on("audio")
+            def on_human_audio(pcm_data):
+                human_received_audio.append(pcm_data)
+
+            @cm_human.on("track_added")
+            def on_human_track_added(track_id, kind, user):
+                if kind == "video" and user and user.user_id != human_user_id:
+                    human_received_video_tracks.append(track_id)
+
+            async with cm_human:
+                await asyncio.sleep(2)  # Let SFU settle
+
+                # Human publishes audio so bot can receive it
+                human_audio_track = AudioStreamTrack(sample_rate=24000, channels=1, format="s16")
+                await cm_human.add_tracks(audio=human_audio_track)
+                await cm_human.republish_tracks()
+
+                # ── Bot sends audio (same path as write_audio_frame) ─
+                for _ in range(100):
+                    num_samples = 480  # 20ms at 24kHz
+                    t = np.linspace(0, 0.020, num_samples, endpoint=False)
+                    samples = (np.sin(2 * np.pi * 440 * t) * 16000).astype(np.int16)
+                    pcm = PcmData(
+                        samples=samples,
+                        sample_rate=24000,
+                        channels=1,
+                        format="s16",
+                    )
+                    bot_client._audio_track.write(pcm)
+
+                # ── Bot sends video (same path as write_video_frame) ─
+                for i in range(15):
+                    value = (i * 30 + 50) % 256
+                    rgb = np.full((120, 160, 3), fill_value=value, dtype=np.uint8)
+                    bot_client._video_track.write(rgb.tobytes(), (160, 120), "RGB")
+
+                # ── Human sends audio back to the bot ────────────────
+                for _ in range(50):
+                    num_samples = 480
+                    t = np.linspace(0, 0.020, num_samples, endpoint=False)
+                    samples = (np.sin(2 * np.pi * 880 * t) * 16000).astype(np.int16)
+                    pcm = PcmData(
+                        samples=samples,
+                        sample_rate=24000,
+                        channels=1,
+                        format="s16",
+                    )
+                    await human_audio_track.write(pcm)
+
+                # ── Wait for media to propagate ──────────────────────
+                deadline = time.time() + 20
+                while time.time() < deadline:
+                    human_got_audio = len(human_received_audio) > 0
+                    human_got_video = len(human_received_video_tracks) > 0
+                    bot_got_audio = bot_client._audio_queue.qsize() > 0
+                    if human_got_audio and human_got_video and bot_got_audio:
+                        break
+                    await asyncio.sleep(0.5)
+
+                # ── Assertions ───────────────────────────────────────
+
+                # Human received audio from the bot
+                self.assertGreater(
+                    len(human_received_audio),
+                    0,
+                    "Human did not receive audio from the bot transport",
+                )
+                pcm_from_bot = human_received_audio[0]
+                self.assertTrue(hasattr(pcm_from_bot, "samples"))
+                self.assertGreater(len(pcm_from_bot.samples), 0)
+
+                # Human received the bot's video track
+                self.assertGreater(
+                    len(human_received_video_tracks),
+                    0,
+                    "Human did not receive video track from the bot transport",
                 )
 
-                @cm_b.on("audio")
-                def on_b_audio(pcm_data):
-                    b_received_audio.append(pcm_data)
+                # Bot received audio from the human (via transport's _audio_queue)
+                self.assertGreater(
+                    bot_client._audio_queue.qsize(),
+                    0,
+                    "Bot transport did not receive audio from human",
+                )
 
-                @cm_b.on("track_added")
-                def on_b_track_added(track_id, kind, user):
-                    if kind == "video" and user and user.user_id != user_b_id:
-                        b_received_video_tracks.append(track_id)
-
-                async with cm_b:
-                    # Brief settle for SFU to register both participants
-                    await asyncio.sleep(2)
-
-                    # ── Publish audio + video from BOTH participants ───
-
-                    # Participant A: audio first, then video separately
-                    audio_track_a = AudioStreamTrack(sample_rate=48000, channels=1, format="s16")
-                    await cm_a.add_tracks(audio=audio_track_a)
-
-                    # Participant B: audio first, then video separately
-                    audio_track_b = AudioStreamTrack(sample_rate=48000, channels=1, format="s16")
-                    await cm_b.add_tracks(audio=audio_track_b)
-
-                    # Add video tracks in a second negotiation
-                    video_track_a = PipecatVideoStreamTrack(framerate=15)
-                    await cm_a.add_tracks(video=video_track_a)
-
-                    video_track_b = PipecatVideoStreamTrack(framerate=15)
-                    await cm_b.add_tracks(video=video_track_b)
-
-                    # Republish tracks so each side gets track_published
-                    # events for the other's already-published tracks
-                    await cm_a.republish_tracks()
-                    await cm_b.republish_tracks()
-
-                    # ── Send audio from both sides ─────────────────────
-                    # Generate 2s of 440Hz tone (100 x 20ms frames)
-                    for _ in range(100):
-                        num_samples = 960  # 20ms at 48kHz
-                        t = np.linspace(0, 0.020, num_samples, endpoint=False)
-                        samples = (np.sin(2 * np.pi * 440 * t) * 16000).astype(np.int16)
-                        pcm = PcmData(
-                            samples=samples,
-                            sample_rate=48000,
-                            channels=1,
-                            format="s16",
-                        )
-                        await audio_track_a.write(pcm)
-                        await audio_track_b.write(pcm)
-
-                    # ── Send video from both sides ─────────────────────
-                    for i in range(10):
-                        value_a = (i * 50 + 10) % 256
-                        value_b = (i * 50 + 130) % 256
-                        rgb_a = np.full((120, 160, 3), fill_value=value_a, dtype=np.uint8)
-                        rgb_b = np.full((120, 160, 3), fill_value=value_b, dtype=np.uint8)
-                        video_track_a.write(rgb_a.tobytes(), (160, 120), "RGB")
-                        video_track_b.write(rgb_b.tobytes(), (160, 120), "RGB")
-
-                    # ── Wait for media to propagate through the SFU ────
-                    deadline = time.time() + 20
-                    while time.time() < deadline:
-                        audio_ok = a_received_audio and b_received_audio
-                        video_ok = a_received_video_tracks and b_received_video_tracks
-                        if audio_ok and video_ok:
-                            break
-                        await asyncio.sleep(0.5)
-
-                    # ── Assertions ─────────────────────────────────────
-
-                    # Audio: A received audio from B and vice versa
-                    self.assertGreater(
-                        len(a_received_audio),
-                        0,
-                        "Participant A did not receive any audio from B",
-                    )
-                    self.assertGreater(
-                        len(b_received_audio),
-                        0,
-                        "Participant B did not receive any audio from A",
-                    )
-
-                    # Verify received audio has valid PcmData properties
-                    pcm_from_b = a_received_audio[0]
-                    self.assertTrue(hasattr(pcm_from_b, "samples"))
-                    self.assertTrue(hasattr(pcm_from_b, "sample_rate"))
-                    self.assertGreater(len(pcm_from_b.samples), 0)
-
-                    pcm_from_a = b_received_audio[0]
-                    self.assertTrue(hasattr(pcm_from_a, "samples"))
-                    self.assertGreater(len(pcm_from_a.samples), 0)
-
-                    # Video: Both sides received the other's video track
-                    self.assertGreater(
-                        len(a_received_video_tracks),
-                        0,
-                        "Participant A did not receive video track from B",
-                    )
-                    self.assertGreater(
-                        len(b_received_video_tracks),
-                        0,
-                        "Participant B did not receive video track from A",
-                    )
+                # Bot saw the human as a participant
+                self.assertIn(
+                    human_user_id,
+                    bot_client._participants,
+                    "Bot transport did not register the human participant",
+                )
 
         finally:
-            # ── Cleanup: delete the call ───────────────────────────────
-            try:
-                await call.delete(hard=True)
-            except Exception:
-                pass
+            # ── Disconnect the bot via the transport ─────────────────
+            await bot_client.disconnect()
+            self.assertFalse(bot_client._connected, "Bot should be disconnected")
 
 
 if __name__ == "__main__":
