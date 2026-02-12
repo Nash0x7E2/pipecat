@@ -307,7 +307,7 @@ class TestStreamVideoBidirectionalMedia(unittest.IsolatedAsyncioTestCase):
                         channels=1,
                         format="s16",
                     )
-                    bot_client._audio_track.write(pcm)
+                    await bot_client._audio_track.write(pcm)
 
                 # ── Bot sends video (same path as write_video_frame) ─
                 for i in range(15):

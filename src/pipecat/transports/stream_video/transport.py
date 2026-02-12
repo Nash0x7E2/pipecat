@@ -1076,7 +1076,7 @@ class StreamVideoOutputTransport(BaseOutputTransport):
                 format="s16",
                 channels=self._params.audio_out_channels,
             )
-            self._client._audio_track.write(pcm_data)
+            await self._client._audio_track.write(pcm_data)
             return True
         except Exception as e:
             logger.error(f"Error writing audio frame: {e}")
