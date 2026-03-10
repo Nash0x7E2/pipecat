@@ -10,7 +10,7 @@ import json
 import time
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Coroutine, Dict, List, Optional
 
 import numpy as np
 from loguru import logger
@@ -475,7 +475,7 @@ class StreamVideoTransportClient:
         # Track audio subscription on first audio from this participant
         if user_id not in self._audio_subscribed_participants:
             self._audio_subscribed_participants.add(user_id)
-            self._task_manager.create_task(
+            self._create_task(
                 self._callbacks.on_audio_track_subscribed(user_id),
                 f"{self}::on_audio_track_subscribed",
             )
@@ -537,7 +537,7 @@ class StreamVideoTransportClient:
 
         logger.info(f"Participant joined: {user_id}")
         self._participants[user_id] = {"session_id": session_id}
-        self._task_manager.create_task(
+        self._create_task(
             self._async_on_participant_joined(user_id),
             f"{self}::_async_on_participant_joined",
         )
@@ -570,14 +570,14 @@ class StreamVideoTransportClient:
         # Clean up subscriptions for this participant
         if user_id in self._audio_subscribed_participants:
             self._audio_subscribed_participants.discard(user_id)
-            self._task_manager.create_task(
+            self._create_task(
                 self._callbacks.on_audio_track_unsubscribed(user_id),
                 f"{self}::on_audio_track_unsubscribed",
             )
 
         if user_id in self._video_subscribed_participants:
             self._video_subscribed_participants.discard(user_id)
-            self._task_manager.create_task(
+            self._create_task(
                 self._callbacks.on_video_track_unsubscribed(user_id),
                 f"{self}::on_video_track_unsubscribed",
             )
@@ -592,7 +592,7 @@ class StreamVideoTransportClient:
             task.cancel()
             self._video_subscriber_tasks.pop(tid, None)
 
-        self._task_manager.create_task(
+        self._create_task(
             self._callbacks.on_participant_left(user_id),
             f"{self}::on_participant_left",
         )
@@ -656,7 +656,7 @@ class StreamVideoTransportClient:
 
         # Start video subscriber only for TRACK_TYPE_VIDEO (not screenshare)
         if track_type == TrackType.TRACK_TYPE_VIDEO:
-            self._task_manager.create_task(
+            self._create_task(
                 self._start_video_subscriber(track_source_id, user_id),
                 f"{self}::_start_video_subscriber",
             )
@@ -680,7 +680,7 @@ class StreamVideoTransportClient:
             await self._callbacks.on_video_track_subscribed(user_id)
 
             task_key = f"{user_id}:{track_id}"
-            task = self._task_manager.create_task(
+            task = self._create_task(
                 self._video_receive_loop(video_track, user_id),
                 f"{self}::_video_receive_loop:{user_id}",
             )
@@ -734,14 +734,14 @@ class StreamVideoTransportClient:
         if track_type == TrackType.TRACK_TYPE_VIDEO:
             if user_id in self._video_subscribed_participants:
                 self._video_subscribed_participants.discard(user_id)
-                self._task_manager.create_task(
+                self._create_task(
                     self._callbacks.on_video_track_unsubscribed(user_id),
                     f"{self}::on_video_track_unsubscribed",
                 )
         elif track_type in (TrackType.TRACK_TYPE_AUDIO, TrackType.TRACK_TYPE_SCREEN_SHARE_AUDIO):
             if user_id in self._audio_subscribed_participants:
                 self._audio_subscribed_participants.discard(user_id)
-                self._task_manager.create_task(
+                self._create_task(
                     self._callbacks.on_audio_track_unsubscribed(user_id),
                     f"{self}::on_audio_track_unsubscribed",
                 )
@@ -750,20 +750,17 @@ class StreamVideoTransportClient:
         """Handle call ended event."""
         logger.info("Stream Video call ended")
         if self._connected:
-            self._task_manager.create_task(
+            self._create_task(
                 self.disconnect(),
                 f"{self}::disconnect_on_call_ended",
             )
 
-    async def get_next_audio_frame(self):
-        """Get the next audio frame from the queue.
+    def _create_task(self, coroutine: Coroutine | Awaitable, name: str) -> asyncio.Task:
+        """Create an asyncio task via the task manager.
 
-        Yields:
-            Tuple of (PcmData, participant_id) for each received audio frame.
+        Raises:
+            RuntimeError: If the task manager has not been initialized via setup().
         """
-        while True:
-            pcm_data, participant_id = await self._audio_queue.get()
-            yield pcm_data, participant_id
 
     async def get_next_video_frame(self):
         """Get the next video frame from the queue.
@@ -774,6 +771,9 @@ class StreamVideoTransportClient:
         while True:
             rgb_array, participant_id = await self._video_queue.get()
             yield rgb_array, participant_id
+        if self._task_manager is None:
+            raise RuntimeError("Task manager not initialized. Was setup() called?")
+        return self._create_task(coroutine, name)
 
     def __str__(self):
         """String representation of the Stream Video transport client."""
