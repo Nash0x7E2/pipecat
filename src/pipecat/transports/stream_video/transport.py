@@ -21,6 +21,8 @@ from pipecat.frames.frames import (
     AudioRawFrame,
     CancelFrame,
     EndFrame,
+    Frame,
+    InterruptionFrame,
     OutputAudioRawFrame,
     OutputImageRawFrame,
     OutputTransportMessageFrame,
@@ -44,12 +46,12 @@ try:
     from getstream.video.rtc import AudioStreamTrack, PcmData
     from getstream.video.rtc.pb.stream.video.sfu.models.models_pb2 import TrackType
     from getstream.video.rtc.tracks import SubscriptionConfig, TrackSubscriptionConfig
-except ModuleNotFoundError as e:
-    logger.error(f"Exception: {e}")
+except ModuleNotFoundError as _e:
+    logger.error(f"Exception: {_e}")
     logger.error(
         "In order to use Stream Video, you need to `pip install pipecat-ai[stream-video]`."
     )
-    raise Exception(f"Missing module: {e}")
+    raise Exception(f"Missing module: {_e}")
 
 
 @dataclass
@@ -137,7 +139,7 @@ class PipecatVideoStreamTrack(MediaStreamTrack):
         self._pts = 0
         self._time_base_den = 90000  # Standard WebRTC clock rate
 
-    def write(self, image: bytes, size: tuple, format: str):
+    def write(self, image: bytes, size: tuple, format: Optional[str]):
         """Write an image frame to the track for WebRTC publishing.
 
         Args:
@@ -148,7 +150,7 @@ class PipecatVideoStreamTrack(MediaStreamTrack):
         width, height = size
         try:
             array = np.frombuffer(image, dtype=np.uint8).reshape(height, width, 3)
-            frame = av.VideoFrame.from_ndarray(array, format="rgb24")
+            frame = av.VideoFrame.from_ndarray(array, format=format)
             frame.pts = self._pts
             frame.time_base = Fraction(1, self._time_base_den)
             self._pts += int(self._time_base_den / self._framerate)
@@ -156,8 +158,8 @@ class PipecatVideoStreamTrack(MediaStreamTrack):
                 self._queue.put_nowait(frame)
             except asyncio.QueueFull:
                 pass
-        except Exception as e:
-            logger.error(f"Error converting image to video frame: {e}")
+        except Exception:
+            logger.exception(f"Error converting image to video frame")
 
     async def recv(self) -> av.VideoFrame:
         """Receive the next video frame for WebRTC publishing.
@@ -267,6 +269,8 @@ class StreamVideoTransportClient:
         self._audio_subscribed_participants: set = set()
         self._video_subscribed_participants: set = set()
 
+        self._out_sample_rate = self._params.audio_out_sample_rate
+
     @property
     def participant_id(self) -> str:
         """Get the bot's user ID.
@@ -291,8 +295,8 @@ class StreamVideoTransportClient:
         # Ensure the bot user exists
         try:
             await self._client.upsert_users(UserRequest(id=self._user_id, name=self._user_id))
-        except Exception as e:
-            logger.warning(f"Could not create user {self._user_id}: {e}")
+        except Exception as exc:
+            logger.warning(f"Could not create user {self._user_id}: {exc}")
 
     async def cleanup(self):
         """Clean up client resources."""
@@ -304,7 +308,7 @@ class StreamVideoTransportClient:
         Args:
             frame: The start frame containing initialization parameters.
         """
-        self._out_sample_rate = self._params.audio_out_sample_rate or frame.audio_out_sample_rate
+        self._out_sample_rate = self._out_sample_rate or frame.audio_out_sample_rate
 
     async def connect(self):
         """Connect to the Stream Video call.
@@ -381,9 +385,9 @@ class StreamVideoTransportClient:
 
                 await self._callbacks.on_connected()
 
-            except Exception as e:
-                logger.error(
-                    f"Error connecting to Stream Video call {self._call_type}:{self._call_id}: {e}"
+            except Exception:
+                logger.exception(
+                    f"Error connecting to Stream Video call {self._call_type}:{self._call_id}"
                 )
                 raise
 
@@ -414,8 +418,8 @@ class StreamVideoTransportClient:
                     await asyncio.wait_for(self._connection.leave(), timeout=5.0)
                 except asyncio.TimeoutError:
                     logger.warning("Timeout leaving Stream Video call, forcing disconnect")
-                except Exception as e:
-                    logger.warning(f"Error leaving Stream Video call: {e}")
+                except Exception as exc:
+                    logger.warning(f"Error leaving Stream Video call: {exc}")
 
             self._connected = False
             self._connection = None
@@ -445,8 +449,8 @@ class StreamVideoTransportClient:
         try:
             custom_data = json.loads(data.decode()) if isinstance(data, bytes) else data
             await self._call.send_call_event(user_id=self._user_id, custom=custom_data)
-        except Exception as e:
-            logger.error(f"Error sending data: {e}")
+        except Exception:
+            logger.exception(f"Error sending data")
 
     def get_participants(self) -> List[str]:
         """Get list of participant IDs in the call.
@@ -455,6 +459,61 @@ class StreamVideoTransportClient:
             List of participant user IDs (excluding the bot).
         """
         return [uid for uid in self._participants.keys() if uid != self._user_id]
+
+    async def get_next_audio_frame(self):
+        """Get the next audio frame from the queue.
+
+        Yields:
+            Tuple of (PcmData, participant_id) for each received audio frame.
+        """
+        while True:
+            pcm_data, participant_id = await self._audio_queue.get()
+            yield pcm_data, participant_id
+
+    async def get_next_video_frame(self):
+        """Get the next video frame from the queue.
+
+        Yields:
+            Tuple of (rgb_ndarray, participant_id) for each received video frame.
+        """
+        while True:
+            rgb_array, participant_id = await self._video_queue.get()
+            yield rgb_array, participant_id
+
+    async def flush_audio(self):
+        """Flush the audio track buffer (e.g. on interruption)."""
+        if self._connected and self._audio_track:
+            await self._audio_track.flush()
+
+    async def write_audio(self, pcm_data: PcmData) -> bool:
+        """Write PCM audio data to the audio track.
+
+        Args:
+            pcm_data: The PCM audio data to write.
+
+        Returns:
+            True if written, False if not connected or no track.
+        """
+        if not self._connected or not self._audio_track:
+            return False
+        await self._audio_track.write(pcm_data)
+        return True
+
+    def write_video(self, image: bytes, size: tuple, format: Optional[str]) -> bool:
+        """Write a video frame to the video track.
+
+        Args:
+            image: Raw image bytes.
+            size: Tuple of (width, height) in pixels.
+            format: Image format string (e.g. "RGB"), or None.
+
+        Returns:
+            True if written, False if not connected or no track.
+        """
+        if not self._connected or not self._video_track:
+            return False
+        self._video_track.write(image, size, format)
+        return True
 
     # Event handlers
 
@@ -688,8 +747,8 @@ class StreamVideoTransportClient:
                 f"{self}::_video_receive_loop:{user_id}",
             )
             self._video_subscriber_tasks[task_key] = task
-        except Exception as e:
-            logger.error(f"Error subscribing to video track {track_id}: {e}")
+        except Exception:
+            logger.exception(f"Error subscribing to video track {track_id}")
 
     async def _video_receive_loop(self, video_track, user_id: str):
         """Receive video frames from a subscribed track and queue them.
@@ -705,8 +764,8 @@ class StreamVideoTransportClient:
                 await self._video_queue.put((rgb_array, user_id))
         except asyncio.CancelledError:
             pass
-        except Exception as e:
-            logger.debug(f"Video receive loop ended for {user_id}: {e}")
+        except Exception as exc:
+            logger.debug(f"Video receive loop ended for {user_id}: {exc}")
 
     def _on_track_unpublished(self, event):
         """Handle track unpublished event.
@@ -764,16 +823,6 @@ class StreamVideoTransportClient:
         Raises:
             RuntimeError: If the task manager has not been initialized via setup().
         """
-
-    async def get_next_video_frame(self):
-        """Get the next video frame from the queue.
-
-        Yields:
-            Tuple of (rgb_ndarray, participant_id) for each received video frame.
-        """
-        while True:
-            rgb_array, participant_id = await self._video_queue.get()
-            yield rgb_array, participant_id
         if self._task_manager is None:
             raise RuntimeError("Task manager not initialized. Was setup() called?")
         return self._create_task(coroutine, name)
@@ -987,6 +1036,10 @@ class StreamVideoOutputTransport(BaseOutputTransport):
 
         self._initialized = False
 
+        # Clock-based audio pacing to avoid drift from asyncio.sleep() inaccuracy.
+        self._audio_clock: float = 0.0
+        self._audio_clock_total: float = 0.0
+
     async def start(self, frame: StartFrame):
         """Start the output transport and connect to the Stream Video call.
 
@@ -1014,6 +1067,23 @@ class StreamVideoOutputTransport(BaseOutputTransport):
         await super().stop(frame)
         await self._client.disconnect()
         logger.info("StreamVideoOutputTransport stopped")
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        """Process incoming frames with Stream Video-specific interruption handling.
+
+        On interruption, flushes the SDK's internal audio buffer so previously
+        buffered TTS audio stops playing immediately.
+
+        Args:
+            frame: The frame to process.
+            direction: The direction of frame flow in the pipeline.
+        """
+        if isinstance(frame, InterruptionFrame) and self._allow_interruptions:
+            await self._client.flush_audio()
+            self._audio_clock = 0.0
+            self._audio_clock_total = 0.0
+
+        await super().process_frame(frame, direction)
 
     async def cancel(self, frame: CancelFrame):
         """Cancel the output transport and disconnect.
@@ -1063,26 +1133,52 @@ class StreamVideoOutputTransport(BaseOutputTransport):
     async def write_audio_frame(self, frame: OutputAudioRawFrame) -> bool:
         """Write an audio frame to the Stream Video call.
 
+        Uses clock-based pacing to output audio at real-time rate. The Stream
+        Video SDK's AudioStreamTrack.write() buffers internally without
+        backpressure, so we track a monotonic clock to avoid both buffer
+        overflow (writing too fast) and audio breakup from asyncio.sleep()
+        drift accumulation.
+
         Args:
             frame: The audio frame to write.
 
         Returns:
             True if the audio frame was written successfully, False otherwise.
         """
-        if not self._client._connected or not self._client._audio_track:
-            return False
-
         try:
+            now = time.monotonic()
+
+            bytes_per_sample = 2  # s16 format
+            duration = len(frame.audio) / (
+                self.sample_rate * bytes_per_sample * self._params.audio_out_channels
+            )
+
+            # Reset clock on first frame or after a gap (e.g. interruption,
+            # silence between utterances). A negative delay means we fell
+            # behind, which indicates a discontinuity.
+            target = self._audio_clock + self._audio_clock_total + duration
+            if self._audio_clock == 0.0 or (target - now) < -0.1:
+                self._audio_clock = now
+                self._audio_clock_total = 0.0
+                target = now + duration
+
+            self._audio_clock_total += duration
+
+            # Sleep until the wall-clock catches up to where this chunk
+            # should be delivered, absorbing prior sleep overshoot.
+            delay = target - now
+            if delay > 0:
+                await asyncio.sleep(delay)
+
             pcm_data = PcmData.from_bytes(
                 frame.audio,
                 sample_rate=self.sample_rate,
                 format="s16",
                 channels=self._params.audio_out_channels,
             )
-            await self._client._audio_track.write(pcm_data)
-            return True
-        except Exception as e:
-            logger.error(f"Error writing audio frame: {e}")
+            return await self._client.write_audio(pcm_data)
+        except Exception:
+            logger.exception(f"Error writing audio frame")
             return False
 
     async def write_video_frame(self, frame: OutputImageRawFrame) -> bool:
@@ -1094,14 +1190,10 @@ class StreamVideoOutputTransport(BaseOutputTransport):
         Returns:
             True if the video frame was written successfully, False otherwise.
         """
-        if not self._client._connected or not self._client._video_track:
-            return False
-
         try:
-            self._client._video_track.write(frame.image, frame.size, frame.format)
-            return True
-        except Exception as e:
-            logger.error(f"Error writing video frame: {e}")
+            return self._client.write_video(frame.image, frame.size, frame.format)
+        except Exception:
+            logger.exception(f"Error writing video frame")
             return False
 
 
