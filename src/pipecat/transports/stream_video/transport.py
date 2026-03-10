@@ -312,6 +312,9 @@ class StreamVideoTransportClient:
         Creates the call, joins the SFU, registers event handlers,
         and publishes audio/video tracks.
         """
+        if self._client is None:
+            raise RuntimeError("Client not initialized. Was setup() called?")
+
         async with self._async_lock:
             if self._connected:
                 self._disconnect_counter += 1
