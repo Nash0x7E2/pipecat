@@ -100,6 +100,7 @@ class StreamVideoCallbacks(BaseModel):
         on_video_track_unsubscribed: Called when a video track is unsubscribed.
         on_data_received: Called when data is received from a participant.
         on_first_participant_joined: Called when the first participant joins.
+        on_error: Called when a transport error occurs.
     """
 
     on_connected: Callable[[], Awaitable[None]]
@@ -113,6 +114,7 @@ class StreamVideoCallbacks(BaseModel):
     on_video_track_unsubscribed: Callable[[str], Awaitable[None]]
     on_data_received: Callable[[bytes, str], Awaitable[None]]
     on_first_participant_joined: Callable[[str], Awaitable[None]]
+    on_error: Callable[[str], Awaitable[None]]
 
 
 class PipecatVideoStreamTrack(MediaStreamTrack):
@@ -386,9 +388,11 @@ class StreamVideoTransportClient:
                 await self._callbacks.on_connected()
 
             except Exception:
-                logger.exception(
+                error_msg = (
                     f"Error connecting to Stream Video call {self._call_type}:{self._call_id}"
                 )
+                logger.exception(error_msg)
+                await self._callbacks.on_error(error_msg)
                 raise
 
     async def disconnect(self):
@@ -450,7 +454,9 @@ class StreamVideoTransportClient:
             custom_data = json.loads(data.decode()) if isinstance(data, bytes) else data
             await self._call.send_call_event(user_id=self._user_id, custom=custom_data)
         except Exception:
-            logger.exception(f"Error sending data")
+            msg = "Error sending data"
+            logger.exception(msg)
+            await self._callbacks.on_error(msg)
 
     def get_participants(self) -> List[str]:
         """Get list of participant IDs in the call.
@@ -748,7 +754,9 @@ class StreamVideoTransportClient:
             )
             self._video_subscriber_tasks[task_key] = task
         except Exception:
-            logger.exception(f"Error subscribing to video track {track_id}")
+            error_msg = f"Error subscribing to video track {track_id}"
+            logger.exception(error_msg)
+            await self._callbacks.on_error(error_msg)
 
     async def _video_receive_loop(self, video_track, user_id: str):
         """Receive video frames from a subscribed track and queue them.
@@ -1241,6 +1249,7 @@ class StreamVideoTransport(BaseTransport):
             on_video_track_unsubscribed=self._on_video_track_unsubscribed,
             on_data_received=self._on_data_received,
             on_first_participant_joined=self._on_first_participant_joined,
+            on_error=self._on_error,
         )
         self._params = params or StreamVideoParams()
 
@@ -1269,6 +1278,7 @@ class StreamVideoTransport(BaseTransport):
         self._register_event_handler("on_first_participant_joined")
         self._register_event_handler("on_participant_left")
         self._register_event_handler("on_before_disconnect", sync=True)
+        self._register_event_handler("on_error")
 
     def input(self) -> StreamVideoInputTransport:
         """Get the input transport for receiving media and events.
@@ -1327,6 +1337,14 @@ class StreamVideoTransport(BaseTransport):
             data: Dictionary of custom event data to send.
         """
         await self._client.send_data(json.dumps(data).encode())
+
+    async def _on_error(self, error: str):
+        """Handle error events and push error frames."""
+        await self._call_event_handler("on_error", error)
+        if self._input:
+            await self._input.push_error(error_msg=error)
+        elif self._output:
+            await self._output.push_error(error_msg=error)
 
     async def _on_connected(self):
         """Handle call connected events."""
