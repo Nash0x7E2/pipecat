@@ -833,7 +833,7 @@ class StreamVideoTransportClient:
         """
         if self._task_manager is None:
             raise RuntimeError("Task manager not initialized. Was setup() called?")
-        return self._create_task(coroutine, name)
+        return self._task_manager.create_task(coroutine, name)
 
     def __str__(self):
         """String representation of the Stream Video transport client."""
