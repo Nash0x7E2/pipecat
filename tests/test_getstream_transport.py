@@ -1,8 +1,8 @@
-"""Tests for Stream Video transport implementation.
+"""Tests for Getstream transport implementation.
 
 Two focused tests:
 1. Mock-based full participant lifecycle (join -> audio -> video -> leave)
-2. Real integration: StreamVideoTransportClient connects, sends audio+video,
+2. Real integration: GetstreamTransportClient connects, sends audio+video,
    a raw SDK participant verifies reception and sends media back.
 """
 
@@ -21,16 +21,16 @@ load_dotenv(override=True)
 try:
     from getstream.video.rtc.pb.stream.video.sfu.models.models_pb2 import TrackType
 
-    from pipecat.transports.stream_video.transport import (
+    from pipecat.transports.getstream.transport import (
+        GetstreamCallbacks,
+        GetstreamParams,
+        GetstreamTransportClient,
         PipecatVideoStreamTrack,
-        StreamVideoCallbacks,
-        StreamVideoParams,
-        StreamVideoTransportClient,
     )
 
-    STREAM_VIDEO_AVAILABLE = True
+    GETSTREAM_AVAILABLE = True
 except Exception:
-    STREAM_VIDEO_AVAILABLE = False
+    GETSTREAM_AVAILABLE = False
 
 
 # ---------------------------------------------------------------------------
@@ -38,9 +38,9 @@ except Exception:
 # ---------------------------------------------------------------------------
 
 
-def _create_callbacks() -> "StreamVideoCallbacks":
-    """Create StreamVideoCallbacks with all-AsyncMock handlers."""
-    return StreamVideoCallbacks(
+def _create_callbacks() -> "GetstreamCallbacks":
+    """Create GetstreamCallbacks with all-AsyncMock handlers."""
+    return GetstreamCallbacks(
         on_connected=AsyncMock(),
         on_disconnected=AsyncMock(),
         on_before_disconnect=AsyncMock(),
@@ -58,14 +58,14 @@ def _create_callbacks() -> "StreamVideoCallbacks":
 def _create_client(
     video_in_enabled: bool = False,
     audio_in_enabled: bool = True,
-) -> "StreamVideoTransportClient":
-    """Create a StreamVideoTransportClient with mocked internals."""
-    params = StreamVideoParams(
+) -> "GetstreamTransportClient":
+    """Create a GetstreamTransportClient with mocked internals."""
+    params = GetstreamParams(
         video_in_enabled=video_in_enabled,
         audio_in_enabled=audio_in_enabled,
     )
     callbacks = _create_callbacks()
-    client = StreamVideoTransportClient(
+    client = GetstreamTransportClient(
         api_key="test-key",
         api_secret="test-secret",
         call_type="default",
@@ -129,8 +129,8 @@ def _make_pcm_data(user_id: str, session_id: str = "session-1"):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(STREAM_VIDEO_AVAILABLE, "getstream[webrtc] package not installed")
-class TestStreamVideoParticipantLifecycle(unittest.IsolatedAsyncioTestCase):
+@unittest.skipUnless(GETSTREAM_AVAILABLE, "getstream[webrtc] package not installed")
+class TestGetstreamParticipantLifecycle(unittest.IsolatedAsyncioTestCase):
     """Mock-based test covering the full event lifecycle:
     join -> audio -> track add/publish -> track unpublish -> leave.
     """
@@ -184,20 +184,20 @@ class TestStreamVideoParticipantLifecycle(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
-# Test 2: Real Integration — StreamVideoTransportClient sends/receives media
+# Test 2: Real Integration — GetstreamTransportClient sends/receives media
 # ---------------------------------------------------------------------------
 
 STREAM_API_KEY = os.environ.get("STREAM_API_KEY")
 STREAM_API_SECRET = os.environ.get("STREAM_API_SECRET")
-STREAM_INTEGRATION_AVAILABLE = bool(STREAM_VIDEO_AVAILABLE and STREAM_API_KEY and STREAM_API_SECRET)
+GETSTREAM_INTEGRATION_AVAILABLE = bool(GETSTREAM_AVAILABLE and STREAM_API_KEY and STREAM_API_SECRET)
 
 
 @unittest.skipUnless(
-    STREAM_INTEGRATION_AVAILABLE,
+    GETSTREAM_INTEGRATION_AVAILABLE,
     "Requires STREAM_API_KEY and STREAM_API_SECRET env vars and getstream[webrtc]",
 )
-class TestStreamVideoBidirectionalMedia(unittest.IsolatedAsyncioTestCase):
-    """Real integration test using StreamVideoTransportClient.
+class TestGetstreamBidirectionalMedia(unittest.IsolatedAsyncioTestCase):
+    """Real integration test using GetstreamTransportClient.
 
     The bot connects via the actual transport client (connect/disconnect),
     publishes audio+video, and a raw SDK participant verifies reception.
@@ -205,7 +205,7 @@ class TestStreamVideoBidirectionalMedia(unittest.IsolatedAsyncioTestCase):
     """
 
     async def test_simultaneous_audio_and_video_bidirectional(self):
-        """StreamVideoTransportClient exchanges audio+video with a real participant."""
+        """GetstreamTransportClient exchanges audio+video with a real participant."""
         from getstream import AsyncStream
         from getstream.models import UserRequest
         from getstream.video import rtc
@@ -217,8 +217,8 @@ class TestStreamVideoBidirectionalMedia(unittest.IsolatedAsyncioTestCase):
         bot_user_id = f"bot-{uuid.uuid4().hex[:6]}"
         human_user_id = f"human-{uuid.uuid4().hex[:6]}"
 
-        # ── Create the bot via StreamVideoTransportClient ────────────
-        bot_params = StreamVideoParams(
+        # ── Create the bot via GetstreamTransportClient ────────────
+        bot_params = GetstreamParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
             video_in_enabled=False,
@@ -226,7 +226,7 @@ class TestStreamVideoBidirectionalMedia(unittest.IsolatedAsyncioTestCase):
             video_out_framerate=15,
         )
         bot_callbacks = _create_callbacks()
-        bot_client = StreamVideoTransportClient(
+        bot_client = GetstreamTransportClient(
             api_key=STREAM_API_KEY,
             api_secret=STREAM_API_SECRET,
             call_type="default",

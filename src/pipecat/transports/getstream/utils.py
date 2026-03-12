@@ -16,7 +16,7 @@ except ModuleNotFoundError as e:
     raise Exception(f"Missing module: {e}")
 
 
-class StreamVideoRESTHelper:
+class GetstreamRESTHelper:
     """Helper class for interacting with Stream Video's REST API.
 
     Provides methods for managing Stream Video calls, users, and tokens.

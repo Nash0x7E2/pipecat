@@ -55,7 +55,7 @@ except ModuleNotFoundError as _e:
 
 
 @dataclass
-class StreamVideoOutputTransportMessageFrame(OutputTransportMessageFrame):
+class GetstreamOutputTransportMessageFrame(OutputTransportMessageFrame):
     """Frame for transport messages in Stream Video calls.
 
     Parameters:
@@ -66,7 +66,7 @@ class StreamVideoOutputTransportMessageFrame(OutputTransportMessageFrame):
 
 
 @dataclass
-class StreamVideoOutputTransportMessageUrgentFrame(OutputTransportMessageUrgentFrame):
+class GetstreamOutputTransportMessageUrgentFrame(OutputTransportMessageUrgentFrame):
     """Frame for urgent transport messages in Stream Video calls.
 
     Parameters:
@@ -76,7 +76,7 @@ class StreamVideoOutputTransportMessageUrgentFrame(OutputTransportMessageUrgentF
     participant_id: Optional[str] = None
 
 
-class StreamVideoParams(TransportParams):
+class GetstreamParams(TransportParams):
     """Configuration parameters for Stream Video transport.
 
     Inherits all parameters from TransportParams without additional configuration.
@@ -85,7 +85,7 @@ class StreamVideoParams(TransportParams):
     pass
 
 
-class StreamVideoCallbacks(BaseModel):
+class GetstreamCallbacks(BaseModel):
     """Callback handlers for Stream Video events.
 
     Parameters:
@@ -206,7 +206,7 @@ class PipecatVideoStreamTrack(MediaStreamTrack):
                 return frame
 
 
-class StreamVideoTransportClient:
+class GetstreamTransportClient:
     """Core client for interacting with Stream Video calls.
 
     Manages the WebRTC connection to Stream Video's SFU and handles all low-level
@@ -220,8 +220,8 @@ class StreamVideoTransportClient:
         call_type: str,
         call_id: str,
         user_id: str,
-        params: StreamVideoParams,
-        callbacks: StreamVideoCallbacks,
+        params: GetstreamParams,
+        callbacks: GetstreamCallbacks,
         transport_name: str,
     ):
         """Initialize the Stream Video transport client.
@@ -829,10 +829,10 @@ class StreamVideoTransportClient:
 
     def __str__(self):
         """String representation of the Stream Video transport client."""
-        return f"{self._transport_name}::StreamVideoTransportClient"
+        return f"{self._transport_name}::GetstreamTransportClient"
 
 
-class StreamVideoInputTransport(BaseInputTransport):
+class GetstreamInputTransport(BaseInputTransport):
     """Handles incoming media streams and events from Stream Video calls.
 
     Processes incoming audio and video from call participants and forwards them
@@ -842,15 +842,15 @@ class StreamVideoInputTransport(BaseInputTransport):
     def __init__(
         self,
         transport: BaseTransport,
-        client: StreamVideoTransportClient,
-        params: StreamVideoParams,
+        client: GetstreamTransportClient,
+        params: GetstreamParams,
         **kwargs,
     ):
         """Initialize the Stream Video input transport.
 
         Args:
             transport: The parent transport instance.
-            client: StreamVideoTransportClient instance.
+            client: GetstreamTransportClient instance.
             params: Configuration parameters.
             **kwargs: Additional arguments passed to parent class.
         """
@@ -884,7 +884,7 @@ class StreamVideoInputTransport(BaseInputTransport):
         if not self._video_in_task and self._params.video_in_enabled:
             self._video_in_task = self.create_task(self._video_in_task_handler())
         await self.set_transport_ready(frame)
-        logger.info("StreamVideoInputTransport started")
+        logger.info("GetstreamInputTransport started")
 
     async def stop(self, frame: EndFrame):
         """Stop the input transport and disconnect.
@@ -898,7 +898,7 @@ class StreamVideoInputTransport(BaseInputTransport):
             await self.cancel_task(self._audio_in_task)
         if self._video_in_task:
             await self.cancel_task(self._video_in_task)
-        logger.info("StreamVideoInputTransport stopped")
+        logger.info("GetstreamInputTransport stopped")
 
     async def cancel(self, frame: CancelFrame):
         """Cancel the input transport and disconnect.
@@ -934,7 +934,7 @@ class StreamVideoInputTransport(BaseInputTransport):
             message: The message data to send.
             sender: ID of the message sender.
         """
-        frame = StreamVideoOutputTransportMessageUrgentFrame(message=message, participant_id=sender)
+        frame = GetstreamOutputTransportMessageUrgentFrame(message=message, participant_id=sender)
         await self.push_frame(frame)
 
     async def _audio_in_task_handler(self):
@@ -1008,7 +1008,7 @@ class StreamVideoInputTransport(BaseInputTransport):
         )
 
 
-class StreamVideoOutputTransport(BaseOutputTransport):
+class GetstreamOutputTransport(BaseOutputTransport):
     """Handles outgoing media streams and events to Stream Video calls.
 
     Manages sending audio frames, video frames, and data messages to
@@ -1018,15 +1018,15 @@ class StreamVideoOutputTransport(BaseOutputTransport):
     def __init__(
         self,
         transport: BaseTransport,
-        client: StreamVideoTransportClient,
-        params: StreamVideoParams,
+        client: GetstreamTransportClient,
+        params: GetstreamParams,
         **kwargs,
     ):
         """Initialize the Stream Video output transport.
 
         Args:
             transport: The parent transport instance.
-            client: StreamVideoTransportClient instance.
+            client: GetstreamTransportClient instance.
             params: Configuration parameters.
             **kwargs: Additional arguments passed to parent class.
         """
@@ -1056,7 +1056,7 @@ class StreamVideoOutputTransport(BaseOutputTransport):
         await self._client.start(frame)
         await self._client.connect()
         await self.set_transport_ready(frame)
-        logger.info("StreamVideoOutputTransport started")
+        logger.info("GetstreamOutputTransport started")
 
     async def stop(self, frame: EndFrame):
         """Stop the output transport and disconnect.
@@ -1066,7 +1066,7 @@ class StreamVideoOutputTransport(BaseOutputTransport):
         """
         await super().stop(frame)
         await self._client.disconnect()
-        logger.info("StreamVideoOutputTransport stopped")
+        logger.info("GetstreamOutputTransport stopped")
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process incoming frames with Stream Video-specific interruption handling.
@@ -1122,8 +1122,8 @@ class StreamVideoOutputTransport(BaseOutputTransport):
         if isinstance(
             frame,
             (
-                StreamVideoOutputTransportMessageFrame,
-                StreamVideoOutputTransportMessageUrgentFrame,
+                GetstreamOutputTransportMessageFrame,
+                GetstreamOutputTransportMessageUrgentFrame,
             ),
         ):
             await self._client.send_data(message.encode(), frame.participant_id)
@@ -1197,7 +1197,7 @@ class StreamVideoOutputTransport(BaseOutputTransport):
             return False
 
 
-class StreamVideoTransport(BaseTransport):
+class GetstreamTransport(BaseTransport):
     """Transport implementation for Stream Video real-time communication.
 
     Provides comprehensive Stream Video integration including audio/video streaming,
@@ -1211,7 +1211,7 @@ class StreamVideoTransport(BaseTransport):
         call_type: str,
         call_id: str,
         user_id: str,
-        params: Optional[StreamVideoParams] = None,
+        params: Optional[GetstreamParams] = None,
         input_name: Optional[str] = None,
         output_name: Optional[str] = None,
     ):
@@ -1229,7 +1229,7 @@ class StreamVideoTransport(BaseTransport):
         """
         super().__init__(input_name=input_name, output_name=output_name)
 
-        callbacks = StreamVideoCallbacks(
+        callbacks = GetstreamCallbacks(
             on_connected=self._on_connected,
             on_disconnected=self._on_disconnected,
             on_before_disconnect=self._on_before_disconnect,
@@ -1242,9 +1242,9 @@ class StreamVideoTransport(BaseTransport):
             on_data_received=self._on_data_received,
             on_first_participant_joined=self._on_first_participant_joined,
         )
-        self._params = params or StreamVideoParams()
+        self._params = params or GetstreamParams()
 
-        self._client = StreamVideoTransportClient(
+        self._client = GetstreamTransportClient(
             api_key,
             api_secret,
             call_type,
@@ -1254,8 +1254,8 @@ class StreamVideoTransport(BaseTransport):
             callbacks,
             self.name,
         )
-        self._input: Optional[StreamVideoInputTransport] = None
-        self._output: Optional[StreamVideoOutputTransport] = None
+        self._input: Optional[GetstreamInputTransport] = None
+        self._output: Optional[GetstreamOutputTransport] = None
 
         self._register_event_handler("on_connected")
         self._register_event_handler("on_disconnected")
@@ -1270,26 +1270,26 @@ class StreamVideoTransport(BaseTransport):
         self._register_event_handler("on_participant_left")
         self._register_event_handler("on_before_disconnect", sync=True)
 
-    def input(self) -> StreamVideoInputTransport:
+    def input(self) -> GetstreamInputTransport:
         """Get the input transport for receiving media and events.
 
         Returns:
             The Stream Video input transport instance.
         """
         if not self._input:
-            self._input = StreamVideoInputTransport(
+            self._input = GetstreamInputTransport(
                 self, self._client, self._params, name=self._input_name
             )
         return self._input
 
-    def output(self) -> StreamVideoOutputTransport:
+    def output(self) -> GetstreamOutputTransport:
         """Get the output transport for sending media and events.
 
         Returns:
             The Stream Video output transport instance.
         """
         if not self._output:
-            self._output = StreamVideoOutputTransport(
+            self._output = GetstreamOutputTransport(
                 self, self._client, self._params, name=self._output_name
             )
         return self._output
@@ -1379,7 +1379,7 @@ class StreamVideoTransport(BaseTransport):
             participant_id: Optional specific participant to send to.
         """
         if self._output:
-            frame = StreamVideoOutputTransportMessageFrame(
+            frame = GetstreamOutputTransportMessageFrame(
                 message=message, participant_id=participant_id
             )
             await self._output.send_message(frame)
@@ -1392,7 +1392,7 @@ class StreamVideoTransport(BaseTransport):
             participant_id: Optional specific participant to send to.
         """
         if self._output:
-            frame = StreamVideoOutputTransportMessageUrgentFrame(
+            frame = GetstreamOutputTransportMessageUrgentFrame(
                 message=message, participant_id=participant_id
             )
             await self._output.send_message(frame)
