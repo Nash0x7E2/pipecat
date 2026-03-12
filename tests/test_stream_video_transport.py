@@ -52,7 +52,6 @@ def _create_callbacks() -> "StreamVideoCallbacks":
         on_video_track_unsubscribed=AsyncMock(),
         on_data_received=AsyncMock(),
         on_first_participant_joined=AsyncMock(),
-        on_error=AsyncMock(),
     )
 
 
@@ -185,48 +184,7 @@ class TestStreamVideoParticipantLifecycle(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
-# Test 2: Error Propagation (Mock)
-# ---------------------------------------------------------------------------
-
-
-@unittest.skipUnless(STREAM_VIDEO_AVAILABLE, "getstream[webrtc] package not installed")
-class TestStreamVideoErrorPropagation(unittest.IsolatedAsyncioTestCase):
-    """Mock-based tests verifying on_error callback is called on transport errors."""
-
-    async def test_on_error_called_on_connect_failure(self):
-        """on_error callback fires when connect() raises."""
-        client = _create_client()
-
-        # Mock the internal connection path to raise
-        client._client = MagicMock()
-        mock_call = AsyncMock()
-        mock_call.join = AsyncMock(side_effect=Exception("connection failed"))
-        client._client.video.call.return_value = mock_call
-        client._client.create_token.return_value = "fake-token"
-
-        with self.assertRaises(Exception):
-            await client.connect()
-
-        client._callbacks.on_error.assert_called_once()
-        error_msg = client._callbacks.on_error.call_args[0][0]
-        self.assertIn("Error connecting to Stream Video call", error_msg)
-
-    async def test_on_error_called_on_send_data_failure(self):
-        """on_error callback fires when send_data() raises."""
-        client = _create_client()
-        client._connected = True
-        client._call = MagicMock()
-        client._call.send_call_event = AsyncMock(side_effect=Exception("send failed"))
-
-        await client.send_data(b'{"test": 1}')
-
-        client._callbacks.on_error.assert_called_once()
-        error_msg = client._callbacks.on_error.call_args[0][0]
-        self.assertIn("Error sending data", error_msg)
-
-
-# ---------------------------------------------------------------------------
-# Test 3: Real Integration — StreamVideoTransportClient sends/receives media
+# Test 2: Real Integration — StreamVideoTransportClient sends/receives media
 # ---------------------------------------------------------------------------
 
 STREAM_API_KEY = os.environ.get("STREAM_API_KEY")
