@@ -10,9 +10,7 @@ try:
     from getstream.models import UserRequest
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
-    logger.error(
-        "In order to use Stream Video, you need to `pip install pipecat-ai[stream-video]`."
-    )
+    logger.error("In order to use Stream Video, you need to `pip install pipecat-ai[getstream]`.")
     raise Exception(f"Missing module: {e}")
 
 
