@@ -37,6 +37,13 @@ from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.utils.asyncio.task_manager import BaseTaskManager
 
+_PIL_TO_PYAV_FORMAT = {
+    "RGB": "rgb24",
+    "RGBA": "rgba",
+    "BGR": "bgr24",
+    "L": "gray",
+}
+
 try:
     import av
     from aiortc import MediaStreamTrack
@@ -48,9 +55,7 @@ try:
     from getstream.video.rtc.tracks import SubscriptionConfig, TrackSubscriptionConfig
 except ModuleNotFoundError as _e:
     logger.error(f"Exception: {_e}")
-    logger.error(
-        "In order to use Stream Video, you need to `pip install pipecat-ai[stream-video]`."
-    )
+    logger.error("In order to use Stream Video, you need to `pip install pipecat-ai[getstream]`.")
     raise Exception(f"Missing module: {_e}")
 
 
@@ -149,8 +154,11 @@ class PipecatVideoStreamTrack(MediaStreamTrack):
         """
         width, height = size
         try:
+            # Pipecat uses PIL format names (e.g. "RGB"), but PyAV expects
+            # FFmpeg pixel format names (e.g. "rgb24").
+            pyav_format = _PIL_TO_PYAV_FORMAT.get(format, format) if format else "rgb24"
             array = np.frombuffer(image, dtype=np.uint8).reshape(height, width, 3)
-            frame = av.VideoFrame.from_ndarray(array, format=format)
+            frame = av.VideoFrame.from_ndarray(array, format=pyav_format)
             frame.pts = self._pts
             frame.time_base = Fraction(1, self._time_base_den)
             self._pts += int(self._time_base_den / self._framerate)
