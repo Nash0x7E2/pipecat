@@ -16,6 +16,8 @@ from unittest.mock import AsyncMock, MagicMock
 import numpy as np
 from dotenv import load_dotenv
 
+from pipecat.utils.asyncio.task_manager import TaskManager, TaskManagerParams
+
 load_dotenv(override=True)
 
 try:
@@ -55,7 +57,7 @@ def _create_callbacks() -> "GetstreamCallbacks":
     )
 
 
-def _create_client(
+async def _create_client(
     video_in_enabled: bool = False,
     audio_in_enabled: bool = True,
 ) -> "GetstreamTransportClient":
@@ -75,8 +77,8 @@ def _create_client(
         callbacks=callbacks,
         transport_name="test-transport",
     )
-    task_manager = MagicMock()
-    task_manager.create_task.return_value = MagicMock()
+    task_manager = TaskManager()
+    task_manager.setup(TaskManagerParams(loop=asyncio.get_running_loop()))
     client._task_manager = task_manager
     return client
 
@@ -137,7 +139,7 @@ class TestGetstreamParticipantLifecycle(unittest.IsolatedAsyncioTestCase):
 
     async def test_full_participant_session(self):
         """Simulate a complete participant session from join to leave."""
-        client = _create_client(video_in_enabled=True)
+        client = await _create_client(video_in_enabled=True)
         user = _make_participant("user-A", "session-1")
 
         # 1. Participant joins
@@ -237,12 +239,10 @@ class TestGetstreamBidirectionalMedia(unittest.IsolatedAsyncioTestCase):
             transport_name="integration-test-bot",
         )
 
-        # Provide a real task manager that actually creates asyncio tasks
-        class SimpleTaskManager:
-            def create_task(self, coro, name=None):
-                return asyncio.ensure_future(coro)
-
-        bot_client._task_manager = SimpleTaskManager()
+        # Provide a real task manager
+        task_manager = TaskManager()
+        task_manager.setup(TaskManagerParams(loop=asyncio.get_running_loop()))
+        bot_client._task_manager = task_manager
 
         # Initialize the API client and upsert bot user (what setup() does)
         bot_client._client = AsyncStream(api_key=STREAM_API_KEY, api_secret=STREAM_API_SECRET)
